@@ -28,7 +28,7 @@ func SendResponse(w io.Writer, data []byte) (int, error) {
 		return 0, err
 	}
 
-	return (n + 4), nil
+	return n + 4, nil
 }
 
 // SendFramedResponse is a server side utility function to prefix data with a length header

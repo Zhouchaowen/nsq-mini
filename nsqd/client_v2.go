@@ -21,13 +21,20 @@ type clientV2 struct {
 	Writer *bufio.Writer
 }
 
-
-func newClientV2( conn net.Conn, nsqd *NSQD) *clientV2 {
+func newClientV2(conn net.Conn, nsqd *NSQD) *clientV2 {
 	c := &clientV2{
-		nsqd: nsqd,
-		Conn: conn,
+		nsqd:   nsqd,
+		Conn:   conn,
 		Reader: bufio.NewReaderSize(conn, defaultBufferSize),
 		Writer: bufio.NewWriterSize(conn, defaultBufferSize),
 	}
 	return c
+}
+
+func (c *clientV2) Flush() error {
+	err := c.Writer.Flush()
+	if err != nil {
+		return err
+	}
+	return nil
 }

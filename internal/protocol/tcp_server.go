@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"runtime"
 	"strings"
@@ -13,7 +14,6 @@ type TCPHandler interface {
 }
 
 func TCPServer(listener net.Listener, handler TCPHandler) error {
-
 	var wg sync.WaitGroup
 
 	for { // 监听连接
@@ -27,6 +27,7 @@ func TCPServer(listener net.Listener, handler TCPHandler) error {
 			if !strings.Contains(err.Error(), "use of closed network connection") {
 				return fmt.Errorf("listener.Accept() error - %s", err)
 			}
+			log.Printf(err.Error())
 			break
 		}
 

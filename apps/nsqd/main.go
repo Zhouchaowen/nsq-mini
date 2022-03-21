@@ -4,6 +4,7 @@ import (
 	"flag"
 	"nsq-mini/nsqd"
 	"os"
+	"os/signal"
 	"sync"
 )
 
@@ -20,12 +21,12 @@ func init() {
 
 func main() {
 	opts := nsqd.NewOptions()
-	if TCPAddress != ""{
+	if TCPAddress != "" {
 		opts.TCPAddress = TCPAddress
 	}
 
 	prg := &program{}
-	nsqd,err := nsqd.New(opts)
+	nsqd, err := nsqd.New(opts)
 	if err != nil {
 		panic(err)
 	}
@@ -43,7 +44,9 @@ func (p *program) Start() error {
 			os.Exit(1)
 		}
 	}()
-
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	<-c
 	return nil
 }
 
