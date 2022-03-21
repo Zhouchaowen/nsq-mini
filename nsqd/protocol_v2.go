@@ -2,10 +2,13 @@ package nsqd
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"nsq-mini/internal/protocol"
+	"time"
 )
 
 const (
@@ -32,6 +35,10 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 
 	client := c.(*clientV2)
 
+	messagePumpStartedChan := make(chan bool)
+	go p.messagePump(client, messagePumpStartedChan)
+	<-messagePumpStartedChan
+
 	for {
 		line, err = client.Reader.ReadSlice('\n') // 解析请求参数
 		if err != nil {
@@ -53,6 +60,7 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 
 		var response []byte
 		response, err = p.Exec(client, params) // 调用相应的 handler 处理 tcp request
+		log.Printf(string(response))
 		if err != nil {
 			sendErr := p.Send(client, frameTypeError, []byte(err.Error()))
 			if sendErr != nil {
@@ -63,17 +71,80 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 		if response != nil {
 			err = p.Send(client, frameTypeResponse, response) // 响应
 			if err != nil {
-				err = fmt.Errorf("failed to send response - %s", err)
+				err = fmt.Errorf("failed to send response - %v", err)
 				break
 			}
 		}
 	}
+	return err
+}
+
+func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
+	var err error
+	var memoryMsgChan chan *Message
+	var subChannel *Channel // 订阅Channel
+
+	//heartbeatTicker := time.NewTicker(3)      // 心跳 定时器
+	//heartbeatChan := heartbeatTicker.C
+
+	// signal to the goroutine that started the messagePump
+	// that we've started up
+	// 向启动我们的 messagePump 的 goroutine 发出信号
+	close(startedChan)
+
+	for {
+		if client.Channel != nil {
+			memoryMsgChan = client.Channel.memoryMsgChan
+			subChannel = client.Channel
+		}
+
+		select {
+		//case <-heartbeatChan: // 接收心跳通知，发送心跳
+		//	err = p.Send(client, frameTypeResponse, heartbeatBytes)
+		//	if err != nil {
+		//		goto exit
+		//	}
+		case msg := <-memoryMsgChan: // 从 channel 的内存 memoryMsgChan 中消费一条消息
+			log.Printf("channel send msg to client")
+			subChannel.StartInFlightTimeout(msg) // 添加到In-Flight
+			err = p.SendMessage(client, msg)     // 发送消息
+			if err != nil {
+				goto exit
+			}
+		default:
+			time.Sleep(3 * time.Second)
+			log.Printf("wait register channel")
+		}
+	}
+
+exit:
+	log.Printf("PROTOCOL(V2): [%v] messagePump error - %s", client, err)
+}
+
+// SendMessage 将 channel 中的消息发送给 consumer client
+func (p *protocolV2) SendMessage(client *clientV2, msg *Message) error {
+	log.Printf("PROTOCOL(V2): writing msg(%s) to client(%v)", msg.ID, client)
+
+	var buf = &bytes.Buffer{}
+
+	_, err := msg.WriteTo(buf)
+	if err != nil {
+		return err
+	}
+
+	err = p.Send(client, frameTypeMessage, buf.Bytes())
+	if err != nil {
+		return err
+	}
+	client.Flush()
 	return nil
 }
 
 func (p *protocolV2) Send(client *clientV2, frameType int32, data []byte) error {
+	client.writeLock.Lock()
 	_, err := protocol.SendFramedResponse(client.Writer, frameType, data)
 	if err != nil {
+		client.writeLock.Unlock()
 		return err
 	}
 
@@ -81,7 +152,7 @@ func (p *protocolV2) Send(client *clientV2, frameType int32, data []byte) error 
 	if frameType != frameTypeMessage {
 		err = client.Flush()
 	}
-
+	client.writeLock.Unlock()
 	return err
 }
 
@@ -112,6 +183,20 @@ func (p *protocolV2) Exec(client *clientV2, params [][]byte) ([]byte, error) {
 }
 
 func (p *protocolV2) IDENTIFY(client *clientV2, params [][]byte) ([]byte, error) {
+	lenSlice := make([]byte, 4)
+	bodyLen, err := readLen(client.Reader, lenSlice)
+	if err != nil {
+		return nil, fmt.Errorf("IDENTIFY failed to read body size")
+	}
+
+	// 如果包长小于 0，报错
+	if bodyLen <= 0 {
+		return nil, fmt.Errorf("IDENTIFY invalid body size %d", bodyLen)
+	}
+
+	body := make([]byte, bodyLen)
+	_, err = io.ReadFull(client.Reader, body)
+
 	return okBytes, nil
 }
 
@@ -128,6 +213,35 @@ func (p *protocolV2) REQ(client *clientV2, params [][]byte) ([]byte, error) {
 }
 
 func (p *protocolV2) PUB(client *clientV2, params [][]byte) ([]byte, error) {
+	if len(params) < 2 {
+		return nil, fmt.Errorf("PUB insufficient number of parameters")
+	}
+
+	topicName := string(params[1])
+
+	lenSlice := make([]byte, 4)
+	bodyLen, err := readLen(client.Reader, lenSlice)
+	if err != nil {
+		return nil, fmt.Errorf("PUB failed to read message body size")
+	}
+
+	if bodyLen <= 0 {
+		return nil, fmt.Errorf("PUB invalid message body size %d", bodyLen)
+	}
+
+	messageBody := make([]byte, bodyLen) // 读取body
+	_, err = io.ReadFull(client.Reader, messageBody)
+	if err != nil {
+		return nil, fmt.Errorf("PUB failed to read message body")
+	}
+
+	topic := p.nsqd.GetTopic(topicName)
+	msg := NewMessage(topic.GenerateID(), messageBody)
+	err = topic.PutMessage(msg) // 添加消息到内存队列或持久化队列并更新统计信息
+	if err != nil {
+		return nil, fmt.Errorf("PUB failed " + err.Error())
+	}
+
 	return okBytes, nil
 }
 
@@ -140,9 +254,30 @@ func (p *protocolV2) NOP(client *clientV2, params [][]byte) ([]byte, error) {
 }
 
 func (p *protocolV2) SUB(client *clientV2, params [][]byte) ([]byte, error) {
+	if len(params) < 3 {
+		return nil, fmt.Errorf("SUB insufficient number of parameters")
+	}
+
+	topicName := string(params[1])
+	channelName := string(params[2])
+
+	var channel *Channel
+	topic := p.nsqd.GetTopic(topicName)
+	channel = topic.GetChannel(channelName)
+	client.Channel = channel
+	// update message pump 更新消息泵
 	return okBytes, nil
 }
 
 func (p *protocolV2) CLS(client *clientV2, params [][]byte) ([]byte, error) {
 	return okBytes, nil
+}
+
+// 读取 tcp body 的长度
+func readLen(r io.Reader, tmp []byte) (int32, error) {
+	_, err := io.ReadFull(r, tmp)
+	if err != nil {
+		return 0, err
+	}
+	return int32(binary.BigEndian.Uint32(tmp)), nil
 }

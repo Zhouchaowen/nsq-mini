@@ -3,6 +3,7 @@ package nsqd
 import (
 	"bufio"
 	"net"
+	"sync"
 )
 
 const defaultBufferSize = 16 * 1024
@@ -19,6 +20,10 @@ type clientV2 struct {
 	// reading/writing interfaces
 	Reader *bufio.Reader
 	Writer *bufio.Writer
+
+	writeLock sync.RWMutex
+
+	Channel *Channel // client 消费的 channel
 }
 
 func newClientV2(conn net.Conn, nsqd *NSQD) *clientV2 {

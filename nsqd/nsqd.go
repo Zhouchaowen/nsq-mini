@@ -20,7 +20,7 @@ func New(opts *Options) (*NSQD, error) {
 	nsq := &NSQD{
 		topicMap: make(map[string]*Topic),
 	}
-	nsq.tcpServer = &tcpServer{}
+	nsq.tcpServer = &tcpServer{nsqd: nsq}
 	nsq.tcpListener, err = net.Listen("tcp", opts.TCPAddress)
 	if err != nil {
 		return nil, fmt.Errorf("listen (%s) failed - %s", opts.TCPAddress, err)
@@ -48,4 +48,17 @@ func (n *NSQD) Main() error {
 
 func (n *NSQD) Exit() {
 
+}
+
+func (n *NSQD) GetTopic(topicName string) *Topic {
+	// 很可能我们已经有了这个主题，所以先尝试读锁
+	t, ok := n.topicMap[topicName]
+	if ok {
+		return t
+	}
+
+	t = NewTopic(topicName, n) // 创建一个Topic，开启messagePump，等待start。
+	n.topicMap[topicName] = t  // 存到nsqd.topicMap中
+
+	return t
 }
