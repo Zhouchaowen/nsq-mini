@@ -76,6 +76,10 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 			}
 		}
 	}
+
+	log.Println("close client.")
+	close(client.ExitChan)
+
 	return err
 }
 
@@ -111,14 +115,25 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 			if err != nil {
 				goto exit
 			}
+		case <-client.ExitChan: // 接收退出通知
+			goto exit
 		default:
+			client.writeLock.Lock()
+			err = client.Flush()
+			client.writeLock.Unlock()
+			if err != nil {
+				goto exit
+			}
 			time.Sleep(3 * time.Second)
 			log.Printf("wait register channel")
 		}
 	}
 
 exit:
-	log.Printf("PROTOCOL(V2): [%v] messagePump error - %s", client, err)
+	log.Printf("PROTOCOL(V2): [%v] exiting messagePump\n", client)
+	if err != nil {
+		log.Printf("PROTOCOL(V2): [%v] messagePump error - %s", client, err)
+	}
 }
 
 // SendMessage 将 channel 中的消息发送给 consumer client
@@ -197,6 +212,8 @@ func (p *protocolV2) IDENTIFY(client *clientV2, params [][]byte) ([]byte, error)
 	body := make([]byte, bodyLen)
 	_, err = io.ReadFull(client.Reader, body)
 
+	log.Println("receive IDENTIFY ", string(body))
+	log.Println("set config: contraction,heartbeat,RAD........")
 	return okBytes, nil
 }
 

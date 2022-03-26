@@ -2,6 +2,7 @@ package nsqd
 
 import (
 	"io"
+	"log"
 	"net"
 	"nsq-mini/internal/protocol"
 	"sync"
@@ -33,8 +34,21 @@ func (p *tcpServer) Handle(conn net.Conn) {
 		return
 	}
 
-	client := prot.NewClient(conn)
-	prot.IOLoop(client)
+	p.conns.Store(conn.RemoteAddr(), conn)
 
+	client := prot.NewClient(conn)
+	err = prot.IOLoop(client)
+	if err != nil {
+		log.Printf("client(%s) - %s", conn.RemoteAddr(), err)
+	}
+
+	p.conns.Delete(conn.RemoteAddr())
 	client.Close()
+}
+
+func (p *tcpServer) Close() {
+	p.conns.Range(func(k, v interface{}) bool {
+		v.(protocol.Client).Close()
+		return true
+	})
 }

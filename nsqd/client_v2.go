@@ -24,14 +24,17 @@ type clientV2 struct {
 	writeLock sync.RWMutex
 
 	Channel *Channel // client 消费的 channel
+
+	ExitChan chan int // client 退出的 chan
 }
 
 func newClientV2(conn net.Conn, nsqd *NSQD) *clientV2 {
 	c := &clientV2{
-		nsqd:   nsqd,
-		Conn:   conn,
-		Reader: bufio.NewReaderSize(conn, defaultBufferSize),
-		Writer: bufio.NewWriterSize(conn, defaultBufferSize),
+		nsqd:     nsqd,
+		Conn:     conn,
+		Reader:   bufio.NewReaderSize(conn, defaultBufferSize),
+		Writer:   bufio.NewWriterSize(conn, defaultBufferSize),
+		ExitChan: make(chan int),
 	}
 	return c
 }
