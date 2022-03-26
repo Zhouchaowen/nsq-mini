@@ -85,7 +85,6 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 
 func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 	var err error
-	var memoryMsgChan chan *Message
 	var subChannel *Channel // 订阅Channel
 
 	//heartbeatTicker := time.NewTicker(3)      // 心跳 定时器
@@ -97,9 +96,9 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 	close(startedChan)
 
 	for {
-		if client.Channel != nil {
-			memoryMsgChan = client.Channel.memoryMsgChan
-			subChannel = client.Channel
+		if client.Channel == nil {
+			time.Sleep(time.Second)
+			continue
 		}
 
 		select {
@@ -108,7 +107,7 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 		//	if err != nil {
 		//		goto exit
 		//	}
-		case msg := <-memoryMsgChan: // 从 channel 的内存 memoryMsgChan 中消费一条消息
+		case msg := <-client.Channel.memoryMsgChan: // 从 channel 的内存 memoryMsgChan 中消费一条消息
 			log.Printf("channel send msg to client")
 			subChannel.StartInFlightTimeout(msg) // 添加到In-Flight
 			err = p.SendMessage(client, msg)     // 发送消息
@@ -118,12 +117,6 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 		case <-client.ExitChan: // 接收退出通知
 			goto exit
 		default:
-			client.writeLock.Lock()
-			err = client.Flush()
-			client.writeLock.Unlock()
-			if err != nil {
-				goto exit
-			}
 			time.Sleep(3 * time.Second)
 			log.Printf("wait register channel")
 		}
@@ -236,7 +229,7 @@ func (p *protocolV2) PUB(client *clientV2, params [][]byte) ([]byte, error) {
 
 	topicName := string(params[1])
 
-	lenSlice := make([]byte, 4)
+	lenSlice := make([]byte, 4) // 读取长度
 	bodyLen, err := readLen(client.Reader, lenSlice)
 	if err != nil {
 		return nil, fmt.Errorf("PUB failed to read message body size")
@@ -252,8 +245,10 @@ func (p *protocolV2) PUB(client *clientV2, params [][]byte) ([]byte, error) {
 		return nil, fmt.Errorf("PUB failed to read message body")
 	}
 
-	topic := p.nsqd.GetTopic(topicName)
-	msg := NewMessage(topic.GenerateID(), messageBody)
+	topic := p.nsqd.GetTopic(topicName) // 获取topic
+
+	msg := NewMessage(topic.GenerateID(), messageBody) // 封装消息
+
 	err = topic.PutMessage(msg) // 添加消息到内存队列或持久化队列并更新统计信息
 	if err != nil {
 		return nil, fmt.Errorf("PUB failed " + err.Error())
@@ -279,8 +274,11 @@ func (p *protocolV2) SUB(client *clientV2, params [][]byte) ([]byte, error) {
 	channelName := string(params[2])
 
 	var channel *Channel
+
 	topic := p.nsqd.GetTopic(topicName)
+
 	channel = topic.GetChannel(channelName)
+
 	client.Channel = channel
 	// update message pump 更新消息泵
 	return okBytes, nil

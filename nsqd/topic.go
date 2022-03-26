@@ -2,15 +2,20 @@ package nsqd
 
 import (
 	"log"
+	"sync"
 	"time"
 )
 
 type Topic struct {
-	name          string              // topic名，生产和消费时需要指定此名称
-	channelMap    map[string]*Channel // 保存每个channel name和channel指针的映射
-	memoryMsgChan chan *Message       // 消息优先存入这个内存chan
+	name              string              // topic名，生产和消费时需要指定此名称
+	channelMap        map[string]*Channel // 保存每个channel name和channel指针的映射
+	memoryMsgChan     chan *Message       // 消息优先存入这个内存chan
+	channelUpdateChan chan int            // topic 内的 channel map 增加/删除的更新通知
+	exitChan          chan int            // 终止 chan
 
 	idFactory *guidFactory // id生成器工厂
+
+	sync.RWMutex
 }
 
 // NewTopic Topic constructor
@@ -29,19 +34,47 @@ func NewTopic(topicName string, nsqd *NSQD) *Topic {
 func (t *Topic) messagePump() {
 	var msg *Message
 	var memoryMsgChan chan *Message
-	memoryMsgChan = t.memoryMsgChan
+	var chans []*Channel
+
+	// do not pass messages before Start(), but avoid blocking Pause() or GetChannel()
+	for { // TODO
+		select {
+		case <-t.channelUpdateChan: // 接收 Channel 更新通知 （创建或删除）
+			continue
+		case <-t.exitChan: // 接收退出通知
+			goto exit
+		}
+		break
+	}
+	t.RLock()
+	for _, c := range t.channelMap {
+		chans = append(chans, c)
+	}
+	t.RUnlock()
+	if len(chans) > 0 { // TODO Topic是没有暂停
+		memoryMsgChan = t.memoryMsgChan
+	}
+
 	// main message loop
 	for {
-		if len(t.channelMap) == 0 {
-			time.Sleep(time.Second)
-			continue
-		}
-
 		select { // 从这里可以看到，如果消息已经被写入磁盘的话，nsq 消费消息就是无序的
+		case <-t.channelUpdateChan: // 接收 Channel 更新通知 （创建或删除）
+			chans = chans[:0]
+			t.RLock()
+			for _, c := range t.channelMap {
+				chans = append(chans, c)
+			}
+			t.RUnlock()
+			if len(chans) == 0 {
+				memoryMsgChan = nil
+			} else {
+				memoryMsgChan = t.memoryMsgChan
+			}
+			continue
 		case msg = <-memoryMsgChan: // 从内存channel获取msg
 		}
 
-		for _, channel := range t.channelMap {
+		for _, channel := range chans {
 			log.Printf("Topic send msg to channle: %v ", msg)
 			err := channel.PutMessage(msg) // 发送msg到内存Channel或持久化队列
 			if err != nil {
@@ -49,7 +82,7 @@ func (t *Topic) messagePump() {
 			}
 		}
 	}
-
+exit:
 	log.Fatalf("TOPIC(%s): closing ... messagePump", t.name)
 }
 
@@ -74,7 +107,16 @@ func (t *Topic) PutMessage(m *Message) error {
 }
 
 func (t *Topic) GetChannel(channelName string) *Channel {
-	channel, _ := t.getOrCreateChannel(channelName)
+	t.Lock()
+	channel, isNew := t.getOrCreateChannel(channelName)
+	t.Unlock()
+	if isNew {
+		// update messagePump state
+		select {
+		case t.channelUpdateChan <- 1: // Channel 更新通知
+		case <-t.exitChan:
+		}
+	}
 
 	return channel
 }
@@ -83,7 +125,6 @@ func (t *Topic) GetChannel(channelName string) *Channel {
 func (t *Topic) getOrCreateChannel(channelName string) (*Channel, bool) {
 	channel, ok := t.channelMap[channelName]
 	if !ok {
-
 		channel = NewChannel(t.name, channelName) // 创建一个Channel
 		t.channelMap[channelName] = channel       // 保存到Topic.channelMap
 		log.Printf("TOPIC(%s): new channel(%s)", t.name, channel.name)

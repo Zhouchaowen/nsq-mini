@@ -12,6 +12,8 @@ type NSQD struct {
 	tcpServer   *tcpServer
 	tcpListener net.Listener
 	topicMap    map[string]*Topic
+
+	sync.RWMutex
 }
 
 func New(opts *Options) (*NSQD, error) {
@@ -52,13 +54,17 @@ func (n *NSQD) Exit() {
 
 func (n *NSQD) GetTopic(topicName string) *Topic {
 	// 很可能我们已经有了这个主题，所以先尝试读锁
+	n.RLock()
 	t, ok := n.topicMap[topicName]
+	n.RUnlock()
 	if ok {
 		return t
 	}
 
+	n.Lock()                   // TODO 有效避免竞争
 	t = NewTopic(topicName, n) // 创建一个Topic，开启messagePump，等待start。
 	n.topicMap[topicName] = t  // 存到nsqd.topicMap中
+	n.Unlock()
 
 	return t
 }
